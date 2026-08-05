@@ -63,6 +63,52 @@ export interface ParsedEntries {
   error?: string | null;
 }
 
+/**
+ * A summary group's subject. Shaped like EntityRef, but the id is wider
+ * because grouping by user yields user ids.
+ */
+export interface SummaryEntityRef {
+  id: number | null;
+  name: string | null;
+}
+
+export interface SummaryGroup {
+  entity: SummaryEntityRef | null;
+  /** Client name, set only when grouping by project, so like-named projects can be told apart. */
+  context: string | null;
+  /** Exact duration. Prefer this over `hours` for anything you add up. */
+  seconds: number;
+  hours: number;
+  billableAmount: number | null;
+  costAmount: number | null;
+  currency: string | null;
+}
+
+export interface SummaryReport {
+  groupBy: string;
+  from: string;
+  to: string;
+  totalSeconds: number;
+  totalHours: number;
+  /** Null when the groups span more than one currency, since a mixed total means nothing. */
+  totalBillableAmount: number | null;
+  totalCostAmount: number | null;
+  currency: string | null;
+  groups: SummaryGroup[];
+}
+
+export type ReportGroupBy = "client" | "project" | "user" | "task";
+
+export interface ReportFilters {
+  from: string;
+  to: string;
+  projectId?: number[];
+  clientId?: number[];
+  userId?: number[];
+  billable?: boolean;
+  invoiced?: boolean;
+}
+
 export class QuantaApiError extends Error {
   constructor(
     message: string,
@@ -192,6 +238,32 @@ export class QuantaClient {
       method: "POST",
       body: JSON.stringify(body),
     });
+  }
+
+  /**
+   * Grouped totals for a date range.
+   *
+   * Unlike the rest of this client, the report endpoints require a permission
+   * on the key's user, so a 403 here means the key's creator cannot open the
+   * equivalent report in the app either. The message names the permission.
+   */
+  summaryReport(groupBy: ReportGroupBy, filters: ReportFilters) {
+    const qs = new URLSearchParams({
+      from: filters.from,
+      to: filters.to,
+      groupBy,
+    });
+    for (const [key, values] of [
+      ["projectId", filters.projectId],
+      ["clientId", filters.clientId],
+      ["userId", filters.userId],
+    ] as const) {
+      for (const value of values ?? []) qs.append(key, String(value));
+    }
+    if (filters.billable !== undefined) qs.set("billable", String(filters.billable));
+    if (filters.invoiced !== undefined) qs.set("invoiced", String(filters.invoiced));
+
+    return this.request<SummaryReport>(`/api/v1/reports/summary?${qs.toString()}`);
   }
 }
 

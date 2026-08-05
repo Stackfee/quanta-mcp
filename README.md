@@ -94,12 +94,18 @@ claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- npx -y @quanta/mcp-se
 | `list_projects` | Projects you can log against, with ids and tasks |
 | `list_time_entries` | Recent entries, optionally within a date range |
 | `list_clients` | Clients in the workspace |
+| `get_time_report` | Grouped totals by client, project, user or task, with billable amounts |
 
 ### Things worth knowing
 
 **`log_time_from_text` previews by default.** The first call parses the text and
 shows what it would log without saving. Calling again with `confirm: true`
 saves it. Each call uses one AI credit.
+
+**Reports need a permission.** `get_time_report` is the one tool that checks
+one. A key carries its creator's permissions, so if that person cannot open
+the summary report in Quanta, the tool is refused and says which permission
+is missing. Everything else only touches your own time.
 
 **Timers are exclusive.** Starting a timer stops whatever was already running,
 matching how the web and desktop apps behave.

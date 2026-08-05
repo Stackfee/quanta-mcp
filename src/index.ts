@@ -17,6 +17,7 @@ import { z } from "zod";
 import {
   QuantaApiError,
   QuantaClient,
+  type ReportGroupBy,
   describeEntry,
   formatDuration,
 } from "./client.js";
@@ -238,6 +239,61 @@ server.tool(
       const clients = await quanta.listClients();
       if (!clients?.length) return text("No clients found.");
       return text(`Clients:\n${clients.map((c) => `  ${c.name} — id ${c.id}`).join("\n")}`);
+    }),
+);
+
+server.tool(
+  "get_time_report",
+  "Grouped time totals for a date range: hours per client, project, user or " +
+    "task, with billable amounts when the workspace tracks rates. Use for " +
+    "questions like 'how many hours did we bill Acme last month' or 'where did " +
+    "this quarter go'. Needs a date range; reports cover at most 366 days.",
+  {
+    from: z.string().describe("First day to include, inclusive, as YYYY-MM-DD"),
+    to: z.string().describe("Last day to include, inclusive, as YYYY-MM-DD"),
+    groupBy: z
+      .enum(["client", "project", "user", "task"])
+      .optional()
+      .describe("How to group the totals. Defaults to client."),
+    billableOnly: z
+      .boolean()
+      .optional()
+      .describe("Only count billable time. Omit to count everything."),
+  },
+  async ({ from, to, groupBy, billableOnly }) =>
+    guard(async () => {
+      const report = await quanta.summaryReport((groupBy ?? "client") as ReportGroupBy, {
+        from,
+        to,
+        billable: billableOnly === true ? true : undefined,
+      });
+
+      if (!report?.groups?.length) {
+        return text(`No time logged between ${from} and ${to}.`);
+      }
+
+      const money = (amount: number | null, currency: string | null) =>
+        amount == null || amount === 0 ? "" : ` — ${amount.toFixed(2)} ${currency ?? ""}`.trimEnd();
+
+      const lines = report.groups.map((g) => {
+        const name = g.entity?.name ?? "(unassigned)";
+        const context = g.context ? ` (${g.context})` : "";
+        // formatDuration takes seconds, and seconds is the exact figure. Hours
+        // is rounded to two decimals for display, so summing it drifts.
+        return `  ${name}${context}: ${formatDuration(g.seconds)}${money(g.billableAmount, g.currency)}`;
+      });
+
+      // The API returns a null total when the groups span several currencies,
+      // because adding them would produce a number that means nothing.
+      const total =
+        report.totalBillableAmount != null
+          ? ` — ${report.totalBillableAmount.toFixed(2)} ${report.currency ?? ""}`.trimEnd()
+          : "";
+
+      return text(
+        `${from} to ${to}, by ${report.groupBy}: ` +
+          `${formatDuration(report.totalSeconds)} total${total}\n${lines.join("\n")}`,
+      );
     }),
 );
 
