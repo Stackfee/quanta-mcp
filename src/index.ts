@@ -137,53 +137,6 @@ server.tool(
 );
 
 server.tool(
-  "log_time_from_text",
-  "Log time by describing the work in plain English, letting Quanta's AI work out " +
-    "the project, duration and start time (e.g. 'spent the morning on the Northwind " +
-    "portal, about 3 hours'). Preview first, then call again with confirm=true to save. " +
-    "Uses one AI credit per call.",
-  {
-    text: z.string().describe("Plain-English description of the work"),
-    confirm: z
-      .boolean()
-      .optional()
-      .describe("false (default) previews the parsed entry; true saves it"),
-  },
-  async ({ text: description, confirm }) =>
-    guard(async () => {
-      const result = await quanta.entryFromText({
-        text: description,
-        localTime: new Date().toISOString(),
-        save: confirm === true,
-      });
-
-      if (!result || result.error) {
-        return text(result?.error ?? "Couldn't interpret that as a time entry.");
-      }
-
-      const entry = result.entries[0];
-      if (!entry) return text("Nothing to log from that description.");
-
-      const summary = [
-        entry.description || "(no description)",
-        entry.project?.name ? `project: ${entry.project.name}` : "project: none matched",
-        `duration: ${formatDuration(entry.durationSeconds)}`,
-        entry.startedAt ? `starting ${new Date(entry.startedAt).toLocaleString()}` : null,
-      ]
-        .filter(Boolean)
-        .join(", ");
-
-      return text(
-        result.saved
-          ? `Saved — ${summary}.`
-          : `Preview (nothing saved yet) — ${summary}. Call again with confirm=true to save it.`,
-      );
-    }),
-);
-
-// ── Reading ────────────────────────────────────────────────────────────────
-
-server.tool(
   "list_projects",
   "List the projects the user can log time against, with their ids and tasks.",
   {},

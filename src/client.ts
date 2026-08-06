@@ -4,9 +4,9 @@
  */
 
 /**
- * A pointer to another record. `id` is null only when the reference names
- * something that isn't a saved record, which happens on an entries-from-text
- * preview, and for the client on a time entry, which the API returns by name.
+ * A pointer to another record: enough to show it, plus the id to fetch the
+ * rest. Nullable because the API models a reference to something that has no
+ * stored record, though every reference on a saved entry carries an id.
  */
 export interface EntityRef {
   id: number | null;
@@ -55,12 +55,6 @@ export interface Paged<T> {
   totalCount: number;
   skip: number;
   take: number;
-}
-
-export interface ParsedEntries {
-  saved: boolean;
-  entries: TimeEntry[];
-  error?: string | null;
 }
 
 /**
@@ -231,13 +225,6 @@ export class QuantaClient {
     return QuantaClient.items(
       await this.request<Paged<Client> | Client[]>("/api/v1/clients?take=200"),
     );
-  }
-
-  entryFromText(body: { text: string; localTime?: string; save?: boolean }) {
-    return this.request<ParsedEntries>("/api/v1/entries-from-text", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
   }
 
   /**
