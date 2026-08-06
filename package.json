@@ -1,6 +1,6 @@
 {
   "name": "quanta-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Track time in Quanta from Claude, Cursor, or any MCP client",
   "type": "module",
   "bin": {
