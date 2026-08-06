@@ -10,14 +10,19 @@ Requires a paid Quanta plan (Individual or Team).
 
 ### 1. Create an API key
 
-In Quanta, go to **Administration → API Keys** and create a key. It's shown
-once, so copy it before closing the panel. The key acts as you: it can see and
-change exactly what your own account can.
+In Quanta, go to **Settings → API Keys** and create a key. It is shown once, at
+creation, so copy it before closing the panel. The key acts as you: it sees
+exactly what your account sees and can change exactly what you can change.
 
-### 2. Point your MCP client at the server
+### 2. Add the server to Claude Desktop
 
-**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`
-on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+Open **Settings → Developer → Edit Config**, which opens the config file for
+you. Or edit it directly:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+The file may not exist yet. If it does not, create it with exactly this:
 
 ```json
 {
@@ -31,13 +36,45 @@ on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
 }
 ```
 
-**Claude Code:**
+If the file already exists, add the `"quanta"` block inside your existing
+`"mcpServers"` object rather than replacing the file. It is JSON, so remember
+the comma between entries.
+
+Then **quit Claude Desktop completely and reopen it**. MCP servers are only
+started at launch, so closing the window or reloading is not enough: use
+Cmd+Q on macOS, or quit from the tray on Windows.
+
+To check it worked, ask Claude *"what am I working on?"*. It should answer from
+your Quanta timer rather than guessing.
+
+> **If Quanta does not appear, it is almost certainly PATH.**
+> Claude Desktop is launched by the operating system, not from your shell, so
+> it does not inherit your `PATH`. If you installed Node through nvm, asdf,
+> Homebrew or Volta, the bare `npx` above will not resolve and the server
+> silently fails to start.
+>
+> Fix it by using the full path. Run `which npx` in a terminal, then use what
+> it prints:
+>
+> ```json
+> "command": "/Users/you/.nvm/versions/node/v22.21.1/bin/npx",
+> "args": ["-y", "quanta-mcp"]
+> ```
+>
+> Claude Desktop writes logs to `~/Library/Logs/Claude/` on macOS if you need
+> to see the actual error.
+
+### 3. Other clients
+
+**Claude Code** runs from your shell, so `npx` resolves normally:
 
 ```bash
 claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- npx -y quanta-mcp
 ```
 
-Restart the client. You should see the Quanta tools available.
+**Cursor and other MCP clients** take the same shape as the Claude Desktop
+config above: command `npx`, args `["-y", "quanta-mcp"]`, and `QUANTA_API_KEY`
+in the environment.
 
 <details>
 <summary>Running from source instead</summary>
@@ -61,7 +98,7 @@ claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- node /absolute/path/t
 
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `QUANTA_API_KEY` | yes | — | From Administration → API Keys |
+| `QUANTA_API_KEY` | yes | — | From Settings → API Keys |
 | `QUANTA_API_URL` | no | `https://api.quanta.is` | Point at another environment for testing |
 
 ## Tools
@@ -124,7 +161,7 @@ data the public API doesn't expose yet, the API is what needs extending.
 ## Security
 
 Keys are stored hashed. Quanta can't show you an existing key again, only mint a
-new one. If a key leaks, revoke it in **Administration → API Keys**; anything
+new one. If a key leaks, revoke it in **Settings → API Keys**; anything
 using it stops working immediately.
 
 Keys carry your permissions, not more. A key created by someone who can't see
