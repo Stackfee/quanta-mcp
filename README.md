@@ -14,20 +14,7 @@ In Quanta, go to **Administration → API Keys** and create a key. It's shown
 once, so copy it before closing the panel. The key acts as you: it can see and
 change exactly what your own account can.
 
-### 2. Build it
-
-> **Not on npm yet.** `@quanta/mcp-server` is unpublished, so `npx -y @quanta/mcp-server`
-> will not work. Clone this repository and build it, then point your client at
-> the built file. The npm instructions below are what will apply once it ships.
-
-```bash
-git clone git@github.com:Stackfee/quanta-mcp.git
-cd quanta-mcp
-npm install
-npm run build          # produces dist/index.js
-```
-
-### 3. Point your MCP client at the server
+### 2. Point your MCP client at the server
 
 **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`
 on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
@@ -36,11 +23,9 @@ on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
 {
   "mcpServers": {
     "quanta": {
-      "command": "node",
-      "args": ["/absolute/path/to/quanta-mcp/dist/index.js"],
-      "env": {
-        "QUANTA_API_KEY": "qta_live_..."
-      }
+      "command": "npx",
+      "args": ["-y", "quanta-mcp"],
+      "env": { "QUANTA_API_KEY": "qta_live_..." }
     }
   }
 }
@@ -49,28 +34,25 @@ on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
 **Claude Code:**
 
 ```bash
-claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- node /absolute/path/to/quanta-mcp/dist/index.js
+claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- npx -y quanta-mcp
 ```
 
 Restart the client. You should see the Quanta tools available.
 
 <details>
-<summary>Once published to npm</summary>
-
-```json
-{
-  "mcpServers": {
-    "quanta": {
-      "command": "npx",
-      "args": ["-y", "@quanta/mcp-server"],
-      "env": { "QUANTA_API_KEY": "qta_live_..." }
-    }
-  }
-}
-```
+<summary>Running from source instead</summary>
 
 ```bash
-claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- npx -y @quanta/mcp-server
+git clone git@github.com:Stackfee/quanta-mcp.git
+cd quanta-mcp
+npm install
+npm run build          # produces dist/index.js
+```
+
+Then point the client at the built file rather than at npx:
+
+```bash
+claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- node /absolute/path/to/quanta-mcp/dist/index.js
 ```
 
 </details>

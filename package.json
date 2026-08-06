@@ -1,5 +1,5 @@
 {
-  "name": "@quanta/mcp-server",
+  "name": "quanta-mcp",
   "version": "0.1.0",
   "description": "Track time in Quanta from Claude, Cursor, or any MCP client",
   "type": "module",
@@ -31,9 +31,6 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "repository": {
     "type": "git",
