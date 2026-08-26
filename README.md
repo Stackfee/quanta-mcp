@@ -109,7 +109,7 @@ claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- node /absolute/path/t
 | `start_timer` | Starts a timer, stopping any already-running one first |
 | `stop_timer` | Stops the running timer and saves the entry |
 | `log_time` | Logs a completed block of time you specify in minutes |
-| `list_projects` | Projects you can log against, with ids and tasks |
+| `list_projects` | Projects you can log against, with ids and tasks. Ids are opaque strings (`proj_…`, `task_…`); pass them back exactly as listed |
 | `list_time_entries` | Recent entries, optionally within a date range |
 | `list_clients` | Clients in the workspace |
 | `get_time_report` | Grouped totals by client, project, user or task, with billable amounts |
