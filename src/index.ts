@@ -76,8 +76,14 @@ server.tool(
     "Use list_projects to find a projectId when the user names a project.",
   {
     description: z.string().optional().describe("What the user is working on"),
-    projectId: z.number().int().optional().describe("Project to log against"),
-    taskId: z.number().int().optional().describe("Task within the project"),
+    projectId: z
+      .string()
+      .optional()
+      .describe("Project to log against: an opaque id like proj_… from list_projects. Never guess one."),
+    taskId: z
+      .string()
+      .optional()
+      .describe("Task within the project: an opaque id like task_… from list_projects"),
   },
   async (args) =>
     guard(async () => {
@@ -110,8 +116,14 @@ server.tool(
   {
     description: z.string().describe("What the work was"),
     minutes: z.number().positive().describe("How long, in minutes"),
-    projectId: z.number().int().optional().describe("Project to log against"),
-    taskId: z.number().int().optional(),
+    projectId: z
+      .string()
+      .optional()
+      .describe("Project to log against: an opaque id like proj_… from list_projects. Never guess one."),
+    taskId: z
+      .string()
+      .optional()
+      .describe("Task within the project: an opaque id like task_… from list_projects"),
     startedAt: z
       .string()
       .optional()

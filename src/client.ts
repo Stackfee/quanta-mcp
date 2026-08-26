@@ -4,22 +4,29 @@
  */
 
 /**
+ * Ids are opaque strings with a type prefix: `proj_…`, `task_…`, `client_…`,
+ * `tag_…`, `time_…`, `user_…`. Treat everything after the prefix as opaque
+ * and never construct one; take them from a list call.
+ */
+export type PublicId = string;
+
+/**
  * A pointer to another record: enough to show it, plus the id to fetch the
  * rest. Nullable because the API models a reference to something that has no
  * stored record, though every reference on a saved entry carries an id.
  */
 export interface EntityRef {
-  id: number | null;
+  id: PublicId | null;
   name: string | null;
 }
 
 export interface UserRef {
-  id: number;
+  id: PublicId;
   name: string | null;
 }
 
 export interface TimeEntry {
-  id: number;
+  id: PublicId;
   description: string | null;
   durationSeconds: number;
   startedAt: string | null;
@@ -34,17 +41,17 @@ export interface TimeEntry {
 }
 
 export interface Project {
-  id: number;
+  id: PublicId;
   name: string;
   code: string | null;
   client: EntityRef | null;
   isActive: boolean;
   totalHoursLogged: number;
-  tasks: { id: number; name: string; billable: boolean }[];
+  tasks: { id: PublicId; name: string; billable: boolean }[];
 }
 
 export interface Client {
-  id: number;
+  id: PublicId;
   name: string;
   currency: string | null;
   isActive: boolean;
@@ -58,11 +65,11 @@ export interface Paged<T> {
 }
 
 /**
- * A summary group's subject. Shaped like EntityRef, but the id is wider
- * because grouping by user yields user ids.
+ * A summary group's subject. Shaped like EntityRef; the id carries the
+ * prefix of whatever the report is grouped by.
  */
 export interface SummaryEntityRef {
-  id: number | null;
+  id: PublicId | null;
   name: string | null;
 }
 
@@ -96,9 +103,9 @@ export type ReportGroupBy = "client" | "project" | "user" | "task";
 export interface ReportFilters {
   from: string;
   to: string;
-  projectId?: number[];
-  clientId?: number[];
-  userId?: number[];
+  projectId?: PublicId[];
+  clientId?: PublicId[];
+  userId?: PublicId[];
   billable?: boolean;
   invoiced?: boolean;
 }
@@ -166,8 +173,8 @@ export class QuantaClient {
 
   startTimer(body: {
     description?: string;
-    projectId?: number;
-    taskId?: number;
+    projectId?: PublicId;
+    taskId?: PublicId;
     billable?: boolean;
   }) {
     return this.request<TimeEntry>("/api/v1/timer/start", {
@@ -192,8 +199,8 @@ export class QuantaClient {
     description?: string;
     durationSeconds: number;
     startedAt?: string;
-    projectId?: number;
-    taskId?: number;
+    projectId?: PublicId;
+    taskId?: PublicId;
     billable?: boolean;
   }) {
     return this.request<TimeEntry>("/api/v1/time-entries", {
@@ -245,7 +252,7 @@ export class QuantaClient {
       ["clientId", filters.clientId],
       ["userId", filters.userId],
     ] as const) {
-      for (const value of values ?? []) qs.append(key, String(value));
+      for (const value of values ?? []) qs.append(key, value);
     }
     if (filters.billable !== undefined) qs.set("billable", String(filters.billable));
     if (filters.invoiced !== undefined) qs.set("invoiced", String(filters.invoiced));
