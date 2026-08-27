@@ -57,7 +57,7 @@ async function guard<T>(fn: () => Promise<T>): Promise<T | { content: { type: "t
 
 const server = new McpServer({
   name: "quanta",
-  version: "0.4.0",
+  version: "0.4.1",
 });
 
 // ── Looking things up by name ──────────────────────────────────────────────
@@ -196,7 +196,7 @@ server.tool(
 server.tool(
   "start_timer",
   "Start a Quanta timer. Any timer already running is stopped first. " +
-    "Use list_projects to find a projectId when the user names a project.",
+    "Project, task and tags take plain names; nothing needs listing first.",
   {
     description: z.string().optional().describe("What the user is working on"),
     project: z.string().optional().describe("Project name (e.g. 'Quanta') or proj_ id"),
@@ -255,7 +255,7 @@ server.tool(
     startedAt: z
       .string()
       .optional()
-      .describe("ISO 8601 start time; defaults to now minus the duration"),
+      .describe("ISO 8601 start time with a timezone offset (e.g. 2026-08-27T09:00:00-04:00); a bare local time is read as UTC. Defaults to now minus the duration."),
   },
   async ({ description, minutes, project, task, tags, billable, startedAt }) =>
     guard(async () => {
@@ -390,11 +390,12 @@ server.tool(
   },
   async ({ from, to, groupBy, user, project, client, task, billableOnly, invoiced }) =>
     guard(async () => {
+      const scopeProject = project ? (await resolveProject(project)).project : undefined;
       const resolved = {
         user: await resolveFilter("user", user, from, to),
         project: await resolveFilter("project", project, from, to),
         client: await resolveFilter("client", client, from, to),
-        task: await resolveFilter("task", task, from, to),
+        task: await resolveFilter("task", task, from, to, scopeProject),
       };
 
       const failed = Object.values(resolved).find((r) => r.error);
@@ -412,7 +413,10 @@ server.tool(
       });
 
       if (!report?.groups?.length) {
-        return text(`No time logged between ${from} and ${to}.`);
+        const scope = [resolved.user.label, resolved.project.label, resolved.client.label, resolved.task.label]
+          .filter(Boolean)
+          .join(", ");
+        return text(`No time logged between ${from} and ${to}${scope ? ` for ${scope}` : ""}.`);
       }
 
       const money = (amount: number | null, currency: string | null) =>
@@ -428,8 +432,9 @@ server.tool(
 
       // The API returns a null total when the groups span several currencies,
       // because adding them would produce a number that means nothing.
+      // Same rule as the per-group amounts: a zero is not worth printing.
       const total =
-        report.totalBillableAmount != null
+        report.totalBillableAmount != null && report.totalBillableAmount !== 0
           ? ` — ${report.totalBillableAmount.toFixed(2)} ${report.currency ?? ""}`.trimEnd()
           : "";
 
@@ -454,9 +459,27 @@ async function resolveFilter(
   value: string | undefined,
   from: string,
   to: string,
+  project?: Project,
 ): Promise<{ ids?: PublicId[]; label?: string; error?: string }> {
   if (!value) return {};
-  if (/^[a-z]+_[0-9a-z]{20,}$/.test(value)) return { ids: [value], label: value };
+  if (isPublicId(value)) return { ids: [value], label: value };
+
+  // Anything with a list endpoint resolves there: it knows about a project that
+  // logged nothing this month (a "0h" answer, not "no such project"), and it
+  // keeps two tasks called "Design" on different projects apart. The summary
+  // report — which is all users have — would merge those into one name.
+  if (kind === "project") {
+    const r = await resolveProject(value);
+    return r.error ? { error: r.error } : { ids: [r.id!], label: r.name };
+  }
+  if (kind === "task") {
+    const r = await resolveTask(value, project);
+    return r.error ? { error: r.error } : { ids: [r.id!], label: r.name };
+  }
+  if (kind === "client") {
+    const { hit, error } = pick(value, await allClients(), (c) => c.name, "client");
+    return hit ? { ids: [hit.id], label: hit.name } : { error };
+  }
 
   const directory = await quanta.entityIdsByName(kind, from, to);
   const wanted = normaliseName(value);
@@ -510,7 +533,12 @@ server.tool(
     user: z.string().optional().describe("Whose entries, by name (e.g. 'Matthew') or user_ id"),
     project: z.string().optional().describe("Restrict to one project, by name or proj_ id"),
     client: z.string().optional().describe("Restrict to one client, by name or client_ id"),
+    task: z.string().optional().describe("Restrict to one task, by name or task_ id"),
     billableOnly: z.boolean().optional().describe("Only billable time. Omit for everything."),
+    invoiced: z
+      .boolean()
+      .optional()
+      .describe("true for invoiced entries only, false for uninvoiced only. Omit for both."),
     limit: z
       .number()
       .int()
@@ -523,12 +551,14 @@ server.tool(
       .optional()
       .describe("Order; '-' is descending. Defaults to -startedAt (newest first)."),
   },
-  async ({ from, to, user, project, client, billableOnly, limit, sort }) =>
+  async ({ from, to, user, project, client, task, billableOnly, invoiced, limit, sort }) =>
     guard(async () => {
+      const scopeProject = project ? (await resolveProject(project)).project : undefined;
       const resolved = {
         user: await resolveFilter("user", user, from, to),
         project: await resolveFilter("project", project, from, to),
         client: await resolveFilter("client", client, from, to),
+        task: await resolveFilter("task", task, from, to, scopeProject),
       };
 
       const failed = Object.values(resolved).find((r) => r.error);
@@ -541,7 +571,9 @@ server.tool(
         userId: resolved.user.ids,
         projectId: resolved.project.ids,
         clientId: resolved.client.ids,
+        taskId: resolved.task.ids,
         billable: billableOnly === true ? true : undefined,
+        invoiced,
         sort: sort ?? "-startedAt",
         take,
       });
@@ -554,7 +586,9 @@ server.tool(
         resolved.user.label,
         resolved.project.label,
         resolved.client.label,
+        resolved.task.label,
         billableOnly ? "billable only" : null,
+        invoiced === true ? "invoiced" : invoiced === false ? "uninvoiced" : null,
       ]
         .filter(Boolean)
         .join(", ");
@@ -602,7 +636,7 @@ server.tool(
     id: z.string().describe("The entry's id, e.g. time_7h3k9m… — shown in square brackets by the list tools"),
     description: z.string().optional().describe("New description"),
     minutes: z.number().positive().optional().describe("New duration, in minutes"),
-    startedAt: z.string().optional().describe("New start time, ISO 8601"),
+    startedAt: z.string().optional().describe("New start time, ISO 8601 with a timezone offset; a bare local time is read as UTC"),
     project: z.string().optional().describe("Move it to this project, by name or proj_ id"),
     task: z.string().optional().describe("Move it to this task, by name or task_ id"),
     billable: z.boolean().optional().describe("Mark billable or not"),
