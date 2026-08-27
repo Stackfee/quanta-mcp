@@ -77,9 +77,8 @@ export interface SummaryGroup {
   entity: SummaryEntityRef | null;
   /** Client name, set only when grouping by project, so like-named projects can be told apart. */
   context: string | null;
-  /** Exact duration. Prefer this over `hours` for anything you add up. */
+  /** Duration in whole seconds, the same unit durationSeconds uses on an entry. */
   seconds: number;
-  hours: number;
   billableAmount: number | null;
   costAmount: number | null;
   currency: string | null;
@@ -90,7 +89,6 @@ export interface SummaryReport {
   from: string;
   to: string;
   totalSeconds: number;
-  totalHours: number;
   /** Null when the groups span more than one currency, since a mixed total means nothing. */
   totalBillableAmount: number | null;
   totalCostAmount: number | null;
