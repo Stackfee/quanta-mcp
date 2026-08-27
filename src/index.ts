@@ -17,9 +17,14 @@ import { z } from "zod";
 import {
   QuantaApiError,
   QuantaClient,
+  type Project,
+  type PublicId,
   type ReportGroupBy,
+  type Tag,
+  type TimeEntry,
   describeEntry,
   formatDuration,
+  normaliseName,
 } from "./client.js";
 
 const apiKey = process.env.QUANTA_API_KEY;
@@ -52,8 +57,126 @@ async function guard<T>(fn: () => Promise<T>): Promise<T | { content: { type: "t
 
 const server = new McpServer({
   name: "quanta",
-  version: "0.1.0",
+  version: "0.4.0",
 });
+
+// ── Looking things up by name ──────────────────────────────────────────────
+//
+// Every write and filter in the API takes an opaque id, but people say
+// "Quanta" and "Matthew". These turn one into the other, so a caller does not
+// have to list projects first just to log an hour against one.
+
+/**
+ * Reference data goes stale slowly (a new project a few times a month) and gets
+ * asked for repeatedly inside one conversation, so it is cached briefly rather
+ * than re-fetched per tool call. Short enough that a project created mid-chat
+ * shows up without restarting the server.
+ */
+const CACHE_MS = 60_000;
+const cache = new Map<string, { at: number; value: unknown }>();
+
+async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value as T;
+  const value = await load();
+  cache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+const isPublicId = (value: string) => /^[a-z]+_[0-9a-z]{20,}$/.test(value);
+
+/**
+ * Picks the one thing a name refers to. Exact match wins; failing that a unique
+ * substring match. Anything ambiguous or unknown returns a message naming the
+ * real options — guessing here means silently logging time against the wrong
+ * project, which is worse than one more question.
+ */
+function pick<T>(
+  value: string,
+  candidates: T[],
+  nameOf: (item: T) => string,
+  kind: string,
+): { hit?: T; error?: string } {
+  const wanted = normaliseName(value);
+  const named = candidates.map((item) => ({ item, name: normaliseName(nameOf(item)) }));
+
+  const exact = named.filter((c) => c.name === wanted);
+  if (exact.length === 1) return { hit: exact[0].item };
+
+  const partial = named.filter((c) => c.name.includes(wanted));
+  if (partial.length === 1) return { hit: partial[0].item };
+
+  if (partial.length > 1) {
+    return {
+      error: `"${value}" matches more than one ${kind}: ${partial
+        .map((c) => nameOf(c.item))
+        .join(", ")}. Say which one.`,
+    };
+  }
+
+  const known = candidates.map(nameOf).sort();
+  return {
+    error: known.length
+      ? `No ${kind} called "${value}". Known ${kind}s: ${known.join(", ")}.`
+      : `This workspace has no ${kind}s.`,
+  };
+}
+
+const allProjects = () => cached("projects", () => quanta.listProjects());
+const allClients = () => cached("clients", () => quanta.listClients());
+const allTags = () => cached("tags", () => quanta.listTags());
+
+async function resolveProject(value?: string): Promise<{ id?: PublicId; name?: string; project?: Project; error?: string }> {
+  if (!value) return {};
+  const projects = await allProjects();
+  if (isPublicId(value)) {
+    const known = projects.find((p) => p.id === value);
+    return { id: value, name: known?.name ?? value, project: known };
+  }
+  const { hit, error } = pick(value, projects, (p) => p.name, "project");
+  return hit ? { id: hit.id, name: hit.name, project: hit } : { error };
+}
+
+/**
+ * Tasks live inside projects, so a task name is only unambiguous within one.
+ * With a project in hand the search is that project's tasks; without one it is
+ * every task in the workspace, which is where duplicate names get caught.
+ */
+async function resolveTask(
+  value?: string,
+  project?: Project,
+): Promise<{ id?: PublicId; name?: string; error?: string }> {
+  if (!value) return {};
+  if (isPublicId(value)) return { id: value, name: value };
+
+  const scope = project
+    ? project.tasks.map((t) => ({ ...t, project: project.name }))
+    : (await allProjects()).flatMap((p) => p.tasks.map((t) => ({ ...t, project: p.name })));
+
+  const { hit, error } = pick(value, scope, (t) => t.name, "task");
+  return hit ? { id: hit.id, name: hit.name } : { error };
+}
+
+async function resolveTags(values?: string[]): Promise<{ ids?: PublicId[]; names?: string[]; error?: string }> {
+  if (!values?.length) return {};
+  const tags = await allTags();
+  const ids: PublicId[] = [];
+  const names: string[] = [];
+
+  for (const value of values) {
+    if (isPublicId(value)) {
+      ids.push(value);
+      names.push(tags.find((t) => t.id === value)?.name ?? value);
+      continue;
+    }
+    const { hit, error } = pick(value, tags, (t) => t.name, "tag");
+    if (error) return { error };
+    ids.push(hit!.id);
+    names.push(hit!.name);
+  }
+
+  return { ids, names };
+}
 
 // ── Timer ──────────────────────────────────────────────────────────────────
 
@@ -76,18 +199,27 @@ server.tool(
     "Use list_projects to find a projectId when the user names a project.",
   {
     description: z.string().optional().describe("What the user is working on"),
-    projectId: z
-      .string()
-      .optional()
-      .describe("Project to log against: an opaque id like proj_… from list_projects. Never guess one."),
-    taskId: z
-      .string()
-      .optional()
-      .describe("Task within the project: an opaque id like task_… from list_projects"),
+    project: z.string().optional().describe("Project name (e.g. 'Quanta') or proj_ id"),
+    task: z.string().optional().describe("Task name (e.g. 'Dev') or task_ id"),
+    tags: z.array(z.string()).optional().describe("Tag names or tag_ ids"),
+    billable: z.boolean().optional().describe("Defaults to billable."),
   },
-  async (args) =>
+  async ({ description, project, task, tags, billable }) =>
     guard(async () => {
-      const entry = await quanta.startTimer(args);
+      const p = await resolveProject(project);
+      if (p.error) return text(p.error);
+      const t = await resolveTask(task, p.project);
+      if (t.error) return text(t.error);
+      const g = await resolveTags(tags);
+      if (g.error) return text(g.error);
+
+      const entry = await quanta.startTimer({
+        description,
+        projectId: p.id,
+        taskId: t.id,
+        tagIds: g.ids,
+        billable,
+      });
       if (!entry) return text("Timer started.");
       return text(`Started: ${describeEntry(entry)}.`);
     }),
@@ -116,21 +248,24 @@ server.tool(
   {
     description: z.string().describe("What the work was"),
     minutes: z.number().positive().describe("How long, in minutes"),
-    projectId: z
-      .string()
-      .optional()
-      .describe("Project to log against: an opaque id like proj_… from list_projects. Never guess one."),
-    taskId: z
-      .string()
-      .optional()
-      .describe("Task within the project: an opaque id like task_… from list_projects"),
+    project: z.string().optional().describe("Project name (e.g. 'Quanta') or proj_ id"),
+    task: z.string().optional().describe("Task name (e.g. 'Dev') or task_ id"),
+    tags: z.array(z.string()).optional().describe("Tag names or tag_ ids"),
+    billable: z.boolean().optional().describe("Defaults to billable."),
     startedAt: z
       .string()
       .optional()
       .describe("ISO 8601 start time; defaults to now minus the duration"),
   },
-  async ({ description, minutes, projectId, taskId, startedAt }) =>
+  async ({ description, minutes, project, task, tags, billable, startedAt }) =>
     guard(async () => {
+      const p = await resolveProject(project);
+      if (p.error) return text(p.error);
+      const t = await resolveTask(task, p.project);
+      if (t.error) return text(t.error);
+      const g = await resolveTags(tags);
+      if (g.error) return text(g.error);
+
       const durationSeconds = Math.round(minutes * 60);
       const start =
         startedAt ?? new Date(Date.now() - durationSeconds * 1000).toISOString();
@@ -139,8 +274,10 @@ server.tool(
         description,
         durationSeconds,
         startedAt: start,
-        projectId,
-        taskId,
+        projectId: p.id,
+        taskId: t.id,
+        tagIds: g.ids,
+        billable,
       });
 
       if (!entry) return text("Time logged.");
@@ -162,7 +299,21 @@ server.tool(
         const tasks = p.tasks.length
           ? `\n    tasks: ${p.tasks.map((t) => `${t.name} [${t.id}]`).join(", ")}`
           : "";
-        return `  ${p.name}${client} — id ${p.id}${tasks}`;
+        // Budgets are the thing people ask about after "how many hours" — show
+        // spend against them here rather than making it a second call.
+        const budgets = (p.budgets ?? [])
+          .map((b) => {
+            const unit = b.type === "money" ? (b.currency ?? "") : "h";
+            const of =
+              b.amount != null
+                ? ` of ${b.amount}${unit === "h" ? "h" : ` ${unit}`}`
+                : "";
+            const spent = b.spent != null ? `${b.spent}${unit === "h" ? "h" : ` ${unit}`}` : "?";
+            const period = b.recurrence === "resetting" ? " per period" : "";
+            return `\n    budget (${b.type}${period}): ${spent}${of} — ${Math.round(b.percentUsed)}% used`;
+          })
+          .join("");
+        return `  ${p.name}${client} — id ${p.id}${tasks}${budgets}`;
       });
 
       return text(`Projects:\n${lines.join("\n")}`);
@@ -177,16 +328,20 @@ server.tool(
     from: z.string().optional().describe("ISO 8601 start of range"),
     to: z.string().optional().describe("ISO 8601 end of range"),
     limit: z.number().int().min(1).max(200).optional().describe("Max entries (default 20)"),
+    skip: z.number().int().min(0).optional().describe("Entries to skip, for paging further back"),
   },
-  async ({ from, to, limit }) =>
+  async ({ from, to, limit, skip }) =>
     guard(async () => {
-      const page = await quanta.listTimeEntries({ from, to, take: limit ?? 20 });
+      const page = await quanta.listTimeEntries({ from, to, skip, take: limit ?? 20 });
       if (!page?.data.length) return text("No time entries in that range.");
 
       const total = page.data.reduce((sum, e) => sum + e.durationSeconds, 0);
+      // Ids are printed because update_time_entry and delete_time_entry need
+      // them, and this is where a caller finds the entry it wants to change.
       const lines = page.data.map((e) => {
         const when = e.startedAt ? new Date(e.startedAt).toLocaleString() : "unknown time";
-        return `  ${when} — ${describeEntry(e)}`;
+        const tags = e.tags?.length ? ` #${e.tags.map((t) => t.name).join(" #")}` : "";
+        return `  ${when} — ${describeEntry(e)}${tags}  [${e.id}]`;
       });
 
       return text(
@@ -220,17 +375,40 @@ server.tool(
       .enum(["client", "project", "user", "task"])
       .optional()
       .describe("How to group the totals. Defaults to client."),
+    user: z.string().optional().describe("Only this person's time, by name (e.g. 'Matthew') or user_ id"),
+    project: z.string().optional().describe("Only this project, by name or proj_ id"),
+    client: z.string().optional().describe("Only this client, by name or client_ id"),
+    task: z.string().optional().describe("Only this task, by name (e.g. 'Design') or task_ id"),
     billableOnly: z
       .boolean()
       .optional()
       .describe("Only count billable time. Omit to count everything."),
+    invoiced: z
+      .boolean()
+      .optional()
+      .describe("true for invoiced time only, false for uninvoiced only. Omit for both."),
   },
-  async ({ from, to, groupBy, billableOnly }) =>
+  async ({ from, to, groupBy, user, project, client, task, billableOnly, invoiced }) =>
     guard(async () => {
+      const resolved = {
+        user: await resolveFilter("user", user, from, to),
+        project: await resolveFilter("project", project, from, to),
+        client: await resolveFilter("client", client, from, to),
+        task: await resolveFilter("task", task, from, to),
+      };
+
+      const failed = Object.values(resolved).find((r) => r.error);
+      if (failed) return text(failed.error!);
+
       const report = await quanta.summaryReport((groupBy ?? "client") as ReportGroupBy, {
         from,
         to,
+        userId: resolved.user.ids,
+        projectId: resolved.project.ids,
+        clientId: resolved.client.ids,
+        taskId: resolved.task.ids,
         billable: billableOnly === true ? true : undefined,
+        invoiced,
       });
 
       if (!report?.groups?.length) {
@@ -258,6 +436,294 @@ server.tool(
       return text(
         `${from} to ${to}, by ${report.groupBy}: ` +
           `${formatDuration(report.totalSeconds)} total${total}\n${lines.join("\n")}`,
+      );
+    }),
+);
+
+/**
+ * Turns whatever the user called something into the id the report expects.
+ *
+ * Accepts an opaque id unchanged, so a caller that already listed projects can
+ * pass one straight through. Otherwise treats the value as a name: exact match
+ * first, then a unique substring match. An ambiguous or unknown name comes back
+ * as a message naming the real options rather than a guess, because silently
+ * reporting on the wrong person is worse than asking again.
+ */
+async function resolveFilter(
+  kind: ReportGroupBy,
+  value: string | undefined,
+  from: string,
+  to: string,
+): Promise<{ ids?: PublicId[]; label?: string; error?: string }> {
+  if (!value) return {};
+  if (/^[a-z]+_[0-9a-z]{20,}$/.test(value)) return { ids: [value], label: value };
+
+  const directory = await quanta.entityIdsByName(kind, from, to);
+  const wanted = normaliseName(value);
+
+  const exact = directory.get(wanted);
+  if (exact) return { ids: [exact.id], label: exact.name };
+
+  const partial = [...directory.entries()].filter(([name]) => name.includes(wanted));
+  if (partial.length === 1) {
+    const [, hit] = partial[0];
+    return { ids: [hit.id], label: hit.name };
+  }
+
+  const known = [...directory.values()].map((v) => v.name).sort();
+  if (partial.length > 1) {
+    return {
+      error:
+        `"${value}" matches more than one ${kind}: ${partial.map(([, v]) => v.name).join(", ")}. ` +
+        "Say which one.",
+    };
+  }
+
+  return {
+    error: known.length
+      ? `No ${kind} matching "${value}" logged time between ${from} and ${to}. Known: ${known.join(", ")}.`
+      : `No ${kind} logged any time between ${from} and ${to}.`,
+  };
+}
+
+const reportRow = (entry: TimeEntry, showUser: boolean): string => {
+  const when = entry.startedAt
+    ? new Date(entry.startedAt).toISOString().slice(0, 10)
+    : "??????????";
+  const where = [entry.project?.name, entry.task?.name].filter(Boolean).join(" / ") || "(no project)";
+  const who = showUser && entry.user?.name ? `${entry.user.name} — ` : "";
+  return `  ${when}  ${formatDuration(entry.durationSeconds).padStart(7)}  ${who}${where}` +
+    `${entry.description ? ` — ${entry.description}` : ""}`;
+};
+
+server.tool(
+  "get_detailed_report",
+  "The individual time entries behind a report, across everyone in the workspace, " +
+    "with totals for everything that matched. Use for 'what did Matthew work on last " +
+    "week', 'show me the entries we billed Acme for', or anything needing entries " +
+    "rather than totals — get_time_report gives totals only, and list_time_entries " +
+    "only ever sees your own work. Filters take plain names ('Matthew', 'Acme'); ids " +
+    "from list_projects work too. Needs a date range; at most 366 days.",
+  {
+    from: z.string().describe("First day to include, inclusive, as YYYY-MM-DD"),
+    to: z.string().describe("Last day to include, inclusive, as YYYY-MM-DD"),
+    user: z.string().optional().describe("Whose entries, by name (e.g. 'Matthew') or user_ id"),
+    project: z.string().optional().describe("Restrict to one project, by name or proj_ id"),
+    client: z.string().optional().describe("Restrict to one client, by name or client_ id"),
+    billableOnly: z.boolean().optional().describe("Only billable time. Omit for everything."),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe("Entries to show (default 25). Totals always cover every match, not just these."),
+    sort: z
+      .enum(["startedAt", "-startedAt", "duration", "-duration", "user", "-user", "task", "-task"])
+      .optional()
+      .describe("Order; '-' is descending. Defaults to -startedAt (newest first)."),
+  },
+  async ({ from, to, user, project, client, billableOnly, limit, sort }) =>
+    guard(async () => {
+      const resolved = {
+        user: await resolveFilter("user", user, from, to),
+        project: await resolveFilter("project", project, from, to),
+        client: await resolveFilter("client", client, from, to),
+      };
+
+      const failed = Object.values(resolved).find((r) => r.error);
+      if (failed) return text(failed.error!);
+
+      const take = limit ?? 25;
+      const report = await quanta.detailedReport({
+        from,
+        to,
+        userId: resolved.user.ids,
+        projectId: resolved.project.ids,
+        clientId: resolved.client.ids,
+        billable: billableOnly === true ? true : undefined,
+        sort: sort ?? "-startedAt",
+        take,
+      });
+
+      if (!report?.data?.length) {
+        return text(`No time entries between ${from} and ${to} for those filters.`);
+      }
+
+      const scope = [
+        resolved.user.label,
+        resolved.project.label,
+        resolved.client.label,
+        billableOnly ? "billable only" : null,
+      ]
+        .filter(Boolean)
+        .join(", ");
+
+      const totals = report.totals;
+      const money =
+        totals?.billableAmount != null && totals.billableAmount !== 0
+          ? ` — ${totals.billableAmount.toFixed(2)} ${totals.currency ?? ""}`.trimEnd()
+          : "";
+
+      // The header counts every match; the rows are only the page asked for.
+      const shown =
+        report.totalCount > report.data.length
+          ? ` (showing ${report.data.length} of ${report.totalCount})`
+          : ` (${report.totalCount} ${report.totalCount === 1 ? "entry" : "entries"})`;
+
+      const header =
+        `${from} to ${to}${scope ? ` — ${scope}` : ""}: ` +
+        `${formatDuration(totals?.seconds ?? 0)}${money}${shown}`;
+
+      return text(`${header}\n${report.data.map((e) => reportRow(e, !resolved.user.ids)).join("\n")}`);
+    }),
+);
+
+server.tool(
+  "list_tags",
+  "The tags available for labelling time entries, with their ids.",
+  {},
+  async () =>
+    guard(async () => {
+      const tags = await quanta.listTags();
+      if (!tags?.length) return text("This workspace has no tags.");
+      return text(`Tags:\n${tags.map((t: Tag) => `  ${t.name} — id ${t.id}`).join("\n")}`);
+    }),
+);
+
+// ── Editing what is already logged ─────────────────────────────────────────
+
+server.tool(
+  "update_time_entry",
+  "Change an existing time entry: its description, how long it was, when it " +
+    "started, what it is booked to, or whether it is billable. Omitted fields " +
+    "are left alone. Get the id from list_time_entries or get_detailed_report.",
+  {
+    id: z.string().describe("The entry's id, e.g. time_7h3k9m… — shown in square brackets by the list tools"),
+    description: z.string().optional().describe("New description"),
+    minutes: z.number().positive().optional().describe("New duration, in minutes"),
+    startedAt: z.string().optional().describe("New start time, ISO 8601"),
+    project: z.string().optional().describe("Move it to this project, by name or proj_ id"),
+    task: z.string().optional().describe("Move it to this task, by name or task_ id"),
+    billable: z.boolean().optional().describe("Mark billable or not"),
+  },
+  async ({ id, description, minutes, startedAt, project, task, billable }) =>
+    guard(async () => {
+      const p = await resolveProject(project);
+      if (p.error) return text(p.error);
+      const t = await resolveTask(task, p.project);
+      if (t.error) return text(t.error);
+
+      const updated = await quanta.updateTimeEntry(id, {
+        description,
+        durationSeconds: minutes === undefined ? undefined : Math.round(minutes * 60),
+        startedAt,
+        projectId: p.id,
+        taskId: t.id,
+        billable,
+      });
+
+      if (!updated) return text("Entry updated.");
+      return text(`Updated: ${describeEntry(updated)}.`);
+    }),
+);
+
+server.tool(
+  "delete_time_entry",
+  "Permanently remove a time entry. Get the id from list_time_entries or " +
+    "get_detailed_report. Confirm with the user first — this is not undoable " +
+    "from here.",
+  {
+    id: z.string().describe("The entry's id, e.g. time_7h3k9m…"),
+  },
+  async ({ id }) =>
+    guard(async () => {
+      await quanta.deleteTimeEntry(id);
+      return text(`Deleted entry ${id}.`);
+    }),
+);
+
+server.tool(
+  "batch_update_time_entries",
+  "Change many entries at once — moving a block of work onto a different " +
+    "project or task, or flipping billable across a set. All or nothing: if " +
+    "one entry cannot be changed, none of them are. At most 100 per call, and " +
+    "each id may appear only once.",
+  {
+    ids: z.array(z.string()).min(1).max(100).describe("The entry ids to change"),
+    project: z.string().optional().describe("Move them all to this project, by name or proj_ id"),
+    task: z.string().optional().describe("Move them all to this task, by name or task_ id"),
+    billable: z.boolean().optional().describe("Set billable across all of them"),
+    description: z.string().optional().describe("Set the same description on all of them"),
+  },
+  async ({ ids, project, task, billable, description }) =>
+    guard(async () => {
+      if (project === undefined && task === undefined && billable === undefined && description === undefined) {
+        return text("Nothing to change. Give at least one of project, task, billable or description.");
+      }
+
+      const p = await resolveProject(project);
+      if (p.error) return text(p.error);
+      const t = await resolveTask(task, p.project);
+      if (t.error) return text(t.error);
+
+      const result = await quanta.batchUpdateTimeEntries(
+        ids.map((id) => ({
+          id,
+          projectId: p.id,
+          taskId: t.id,
+          billable,
+          description,
+        })),
+      );
+
+      const changed = result?.data?.length ?? 0;
+      const moved = [p.name && `project ${p.name}`, t.name && `task ${t.name}`]
+        .filter(Boolean)
+        .join(", ");
+      return text(`Updated ${changed} ${changed === 1 ? "entry" : "entries"}${moved ? ` → ${moved}` : ""}.`);
+    }),
+);
+
+// ── Sync ───────────────────────────────────────────────────────────────────
+
+server.tool(
+  "get_recent_changes",
+  "Everything that changed in the workspace since a point in time, deletions " +
+    "included, across every user. Built for keeping a copy of the data " +
+    "elsewhere in step; for ordinary questions about where time went, prefer " +
+    "get_detailed_report. Needs the detailed-report permission.",
+  {
+    since: z
+      .string()
+      .optional()
+      .describe("UTC instant, ISO 8601. Use 1970-01-01T00:00:00Z to seed from nothing. Required unless cursor is given."),
+    cursor: z.string().optional().describe("Continue a previous run: the nextCursor it returned"),
+    limit: z.number().int().min(1).max(200).optional().describe("Rows per page (default 50)"),
+  },
+  async ({ since, cursor, limit }) =>
+    guard(async () => {
+      if (!since && !cursor) {
+        return text("Give either since (an ISO 8601 instant) or a cursor from a previous call.");
+      }
+
+      const page = await quanta.changes({ since, cursor, take: limit ?? 50 });
+      if (!page) return text("No changes.");
+
+      const lines = [
+        ...page.data.map(
+          (e) => `  changed ${e.modifiedAt} — ${describeEntry(e)}  [${e.id}]`,
+        ),
+        ...page.deleted.map((e) => `  deleted ${e.deletedAt} — [${e.id}]`),
+      ];
+
+      if (!lines.length) return text("Nothing has changed since then.");
+
+      const more = page.hasMore
+        ? `\nMore to come — call again with cursor: ${page.nextCursor}`
+        : "\nUp to date.";
+      return text(
+        `${page.data.length} changed, ${page.deleted.length} deleted:\n${lines.join("\n")}${more}`,
       );
     }),
 );

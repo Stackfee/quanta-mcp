@@ -103,23 +103,42 @@ claude mcp add quanta --env QUANTA_API_KEY=qta_live_... -- node /absolute/path/t
 
 ## Tools
 
+Every endpoint of the public API is covered.
+
 | Tool | What it does |
 | --- | --- |
 | `get_current_timer` | Whether a timer is running, and what it's tracking |
 | `start_timer` | Starts a timer, stopping any already-running one first |
 | `stop_timer` | Stops the running timer and saves the entry |
 | `log_time` | Logs a completed block of time you specify in minutes |
-| `list_projects` | Projects you can log against, with ids and tasks. Ids are opaque strings (`proj_…`, `task_…`); pass them back exactly as listed |
-| `list_time_entries` | Recent entries, optionally within a date range |
+| `update_time_entry` | Edits one entry: description, duration, start, project, task, billable |
+| `delete_time_entry` | Permanently removes an entry |
+| `batch_update_time_entries` | Moves or re-flags up to 100 entries at once, all or nothing |
+| `list_time_entries` | Your recent entries, with their ids |
+| `list_projects` | Projects you can log against, with tasks, billing and budget progress |
 | `list_clients` | Clients in the workspace |
-| `get_time_report` | Grouped totals by client, project, user or task, with billable amounts |
+| `list_tags` | Tags available for labelling entries |
+| `get_time_report` | Grouped totals by client, project, user or task, filterable |
+| `get_detailed_report` | The individual entries behind a report, across everyone |
+| `get_recent_changes` | Everything that changed since a timestamp, deletions included |
 
 ### Things worth knowing
 
-**Reports need a permission.** `get_time_report` is the one tool that checks
-one. A key carries its creator's permissions, so if that person cannot open
-the summary report in Quanta, the tool is refused and says which permission
-is missing. Everything else only touches your own time.
+**Say names, not ids.** Every tool that takes a project, task, client, user or
+tag accepts the plain name — "log two hours on Quanta, Dev task". Opaque ids
+(`proj_…`) work too, so anything read from `list_projects` can be passed
+straight back. A name that matches nothing, or matches more than one thing,
+comes back asking which you meant rather than guessing.
+
+**Reports need a permission, and see everyone.** `get_time_report`,
+`get_detailed_report` and `get_recent_changes` span the whole workspace, so
+they check the report permissions. A key carries its creator's permissions, so
+if that person cannot open the report in Quanta, the tool is refused and says
+which permission is missing.
+
+**`list_time_entries` only ever shows your own work.** That is the API's
+behaviour, not a setting. To see what someone else did, use
+`get_detailed_report` with `user`.
 
 **Timers are exclusive.** Starting a timer stops whatever was already running,
 matching how the web and desktop apps behave.
