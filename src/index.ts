@@ -630,8 +630,8 @@ server.tool(
 server.tool(
   "update_time_entry",
   "Change an existing time entry: its description, how long it was, when it " +
-    "started, what it is booked to, or whether it is billable. Omitted fields " +
-    "are left alone. Get the id from list_time_entries or get_detailed_report.",
+    "started, what it is booked to, whether it is billable, or whether it was " +
+    "invoiced outside Quanta. Omitted fields are left alone. Get the id from list_time_entries or get_detailed_report.",
   {
     id: z.string().describe("The entry's id, e.g. time_7h3k9m… — shown in square brackets by the list tools"),
     description: z.string().optional().describe("New description"),
@@ -640,8 +640,12 @@ server.tool(
     project: z.string().optional().describe("Move it to this project, by name or proj_ id"),
     task: z.string().optional().describe("Move it to this task, by name or task_ id"),
     billable: z.boolean().optional().describe("Mark billable or not"),
+    invoiced: z
+      .boolean()
+      .optional()
+      .describe("true when this work was invoiced outside Quanta (it leaves the uninvoiced reports); false to put it back"),
   },
-  async ({ id, description, minutes, startedAt, project, task, billable }) =>
+  async ({ id, description, minutes, startedAt, project, task, billable, invoiced }) =>
     guard(async () => {
       const p = await resolveProject(project);
       if (p.error) return text(p.error);
@@ -655,6 +659,7 @@ server.tool(
         projectId: p.id,
         taskId: t.id,
         billable,
+        invoiced,
       });
 
       if (!updated) return text("Entry updated.");
@@ -680,7 +685,8 @@ server.tool(
 server.tool(
   "batch_update_time_entries",
   "Change many entries at once — moving a block of work onto a different " +
-    "project or task, or flipping billable across a set. All or nothing: if " +
+    "project or task, flipping billable across a set, or marking work that was " +
+    "invoiced outside Quanta so it leaves the uninvoiced reports. All or nothing: if " +
     "one entry cannot be changed, none of them are. At most 100 per call, and " +
     "each id may appear only once.",
   {
@@ -689,11 +695,15 @@ server.tool(
     task: z.string().optional().describe("Move them all to this task, by name or task_ id"),
     billable: z.boolean().optional().describe("Set billable across all of them"),
     description: z.string().optional().describe("Set the same description on all of them"),
+    invoiced: z
+      .boolean()
+      .optional()
+      .describe("true when this work was invoiced outside Quanta (it leaves the uninvoiced reports); false to put it back"),
   },
-  async ({ ids, project, task, billable, description }) =>
+  async ({ ids, project, task, billable, description, invoiced }) =>
     guard(async () => {
-      if (project === undefined && task === undefined && billable === undefined && description === undefined) {
-        return text("Nothing to change. Give at least one of project, task, billable or description.");
+      if (project === undefined && task === undefined && billable === undefined && description === undefined && invoiced === undefined) {
+        return text("Nothing to change. Give at least one of project, task, billable, description or invoiced.");
       }
 
       const p = await resolveProject(project);
@@ -708,6 +718,7 @@ server.tool(
           taskId: t.id,
           billable,
           description,
+          invoiced,
         })),
       );
 
