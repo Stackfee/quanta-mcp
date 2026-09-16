@@ -33,6 +33,8 @@ export interface TimeEntry {
   stoppedAt: string | null;
   isRunning: boolean;
   billable: boolean;
+  /** On a Quanta invoice, in a closed retainer statement, or flagged as invoiced outside Quanta. */
+  invoiced: boolean;
   project: EntityRef | null;
   task: EntityRef | null;
   client: EntityRef | null;
@@ -305,6 +307,7 @@ export class QuantaClient {
       projectId?: PublicId;
       taskId?: PublicId;
       billable?: boolean;
+      invoiced?: boolean;
     },
   ) {
     return this.request<TimeEntry>(`/api/v1/time-entries/${encodeURIComponent(id)}`, {
@@ -336,6 +339,7 @@ export class QuantaClient {
       projectId?: PublicId;
       taskId?: PublicId;
       billable?: boolean;
+      invoiced?: boolean;
     }[],
   ) {
     return this.request<{ data: TimeEntry[] }>("/api/v1/time-entries/batch", {
