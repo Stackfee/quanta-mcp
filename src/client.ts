@@ -47,7 +47,7 @@ export interface Project {
   client: EntityRef | null;
   isActive: boolean;
   totalHoursLogged: number;
-  tasks: { id: PublicId; name: string; billable: boolean }[];
+  tasks: { id: PublicId; name: string; billable: boolean; isArchived?: boolean }[];
   billing: ProjectBilling | null;
   budgets: ProjectBudget[];
 }
@@ -90,8 +90,88 @@ export interface ProjectBudget {
 export interface Client {
   id: PublicId;
   name: string;
+  code: string | null;
   currency: string | null;
   isActive: boolean;
+}
+
+export interface Task {
+  id: PublicId;
+  name: string;
+  billable: boolean;
+  isArchived: boolean;
+}
+
+/** How a new or changed project is billed. Replaces the billing setup as a whole. */
+export interface ProjectBillingInput {
+  type: "hourly" | "fixed_fee" | "non_billable";
+  hourlyRate?: number;
+  fixedFeeAmount?: number;
+}
+
+export interface TaskInput {
+  name: string;
+  billable?: boolean;
+  billableRate?: number;
+}
+
+/** An amount in one currency. Totals are lists of these: a workspace can invoice in several. */
+export interface Money {
+  currency: string;
+  amount: number;
+}
+
+export type InvoiceStatus = "draft" | "sent" | "partially_paid" | "paid" | "overdue" | "void";
+
+export interface Invoice {
+  id: PublicId;
+  number: string | null;
+  /** The status the app shows, worked out from payments and the due date. */
+  status: InvoiceStatus;
+  client: EntityRef | null;
+  currency: string | null;
+  /** Calendar days, YYYY-MM-DD, in the workspace's timezone. */
+  issuedOn: string;
+  dueOn: string | null;
+  total: number;
+  amountPaid: number;
+  balanceDue: number;
+}
+
+export interface InvoiceDetail extends Invoice {
+  subject: string | null;
+  poNumber: string | null;
+  notes: string | null;
+  subTotal: number;
+  totalTax: number;
+  lines: { description: string | null; quantity: number; unitPrice: number; amount: number; taxable: boolean }[];
+  taxes: { name: string | null; rate: number; amount: number }[];
+  payments: { paidOn: string; amount: number; method: string }[];
+}
+
+/** Totals for every invoice matching the filters, not only the page returned. */
+export interface InvoiceTotals {
+  outstandingCount: number;
+  outstanding: Money[];
+  overdueCount: number;
+  overdue: Money[];
+  invoiced: Money[];
+}
+
+export interface InvoiceList extends Paged<Invoice> {
+  totals: InvoiceTotals | null;
+}
+
+export interface InvoiceFilters {
+  status?: InvoiceStatus;
+  outstanding?: boolean;
+  clientId?: PublicId;
+  projectId?: PublicId;
+  from?: string;
+  to?: string;
+  sort?: string;
+  skip?: number;
+  take?: number;
 }
 
 export interface Paged<T> {
@@ -227,8 +307,19 @@ export class QuantaClient {
     if (response.status === 204) return null;
 
     if (response.status === 401) {
+      // The API says why: an unknown or revoked key, a plan without API
+      // access, or a deactivated user. Pass that on rather than guessing.
+      let reason = "";
+      try {
+        const body = (await response.json()) as { message?: string };
+        reason = body.message ?? "";
+      } catch {
+        /* non-JSON error body */
+      }
       throw new QuantaApiError(
-        "Quanta rejected the API key. Check QUANTA_API_KEY, and that the workspace has an active paid plan.",
+        `Quanta rejected the API key. ${reason || "It is not valid, or it has been revoked or expired."} ` +
+          "Check that QUANTA_API_KEY holds the whole key (it starts with qta_live_ and is 52 characters long), " +
+          "copied when the key was created under Settings -> API Keys.",
         401,
       );
     }
@@ -271,13 +362,21 @@ export class QuantaClient {
     return this.request<TimeEntry>("/api/v1/timer/stop", { method: "POST" });
   }
 
-  listTimeEntries(params: { from?: string; to?: string; skip?: number; take?: number } = {}) {
+  /** The key's own entries, or with `userId` someone else's (needs the manage permission). */
+  listTimeEntries(
+    params: { from?: string; to?: string; skip?: number; take?: number; userId?: PublicId } = {},
+  ) {
     const qs = new URLSearchParams();
+    if (params.userId) qs.set("userId", params.userId);
     if (params.from) qs.set("from", params.from);
     if (params.to) qs.set("to", params.to);
     if (params.skip !== undefined) qs.set("skip", String(params.skip));
     qs.set("take", String(params.take ?? 20));
     return this.request<Paged<TimeEntry>>(`/api/v1/time-entries?${qs.toString()}`);
+  }
+
+  getTimeEntry(id: PublicId) {
+    return this.request<TimeEntry>(`/api/v1/time-entries/${encodeURIComponent(id)}`);
   }
 
   createTimeEntry(body: {
@@ -288,6 +387,8 @@ export class QuantaClient {
     taskId?: PublicId;
     billable?: boolean;
     tagIds?: PublicId[];
+    /** Log the time for this person instead of the key's user. Needs the manage permission. */
+    userId?: PublicId;
   }) {
     return this.request<TimeEntry>("/api/v1/time-entries", {
       method: "POST",
@@ -361,33 +462,171 @@ export class QuantaClient {
     return this.request<TimeEntryChanges>(`/api/v1/time-entries/changes?${qs.toString()}`);
   }
 
-  // Reference data is paged like /time-entries. Ask for the maximum page so a
-  // large workspace doesn't quietly look half-empty.
+  // Reference data is paged like /time-entries, so the lists below walk every
+  // page: a large workspace must not quietly look half-empty.
   //
-  // Accepts either shape. These endpoints returned a bare array before paging
+  // A bare array is accepted too. These endpoints returned one before paging
   // was added, and a published client meets whatever API version a workspace is
-  // running — so assuming the new envelope makes an older server look like an
-  // empty workspace rather than an error, which is the worst way to be wrong.
-  private static items<T>(result: Paged<T> | T[] | null): T[] {
-    if (!result) return [];
-    if (Array.isArray(result)) return result;
-    return result.data ?? [];
+  // running, so assuming the envelope makes an older server look like an empty
+  // workspace rather than an error, which is the worst way to be wrong.
+
+  /**
+   * Every row of a paged list, following pages until the reported total is
+   * reached. Capped so a runaway list cannot loop forever.
+   */
+  private async everyPage<T>(path: string): Promise<T[]> {
+    const all: T[] = [];
+    const separator = path.includes("?") ? "&" : "?";
+
+    for (let page = 0; page < 25; page++) {
+      const result = await this.request<Paged<T> | T[]>(
+        `${path}${separator}skip=${all.length}&take=200`,
+      );
+      if (!result) break;
+      if (Array.isArray(result)) return result;
+
+      const rows = result.data ?? [];
+      all.push(...rows);
+      if (!rows.length || all.length >= (result.totalCount ?? 0)) break;
+    }
+
+    return all;
   }
 
-  async listProjects() {
-    return QuantaClient.items(
-      await this.request<Paged<Project> | Project[]>("/api/v1/projects?take=200"),
-    );
+  /**
+   * Projects. By default the ones the key's user is on, which is what the timer
+   * offers. `scope: "all"` lists every project that user may see on the Projects
+   * page, and with `isActive: false` the deactivated ones instead.
+   */
+  listProjects(options: { scope?: "assigned" | "all"; isActive?: boolean } = {}) {
+    const qs = new URLSearchParams();
+    if (options.scope === "all") {
+      qs.set("scope", "all");
+      if (options.isActive === false) qs.set("isActive", "false");
+    }
+    const query = qs.toString();
+    return this.everyPage<Project>(`/api/v1/projects${query ? `?${query}` : ""}`);
   }
 
-  async listClients() {
-    return QuantaClient.items(
-      await this.request<Paged<Client> | Client[]>("/api/v1/clients?take=200"),
-    );
+  getProject(id: PublicId) {
+    return this.request<Project>(`/api/v1/projects/${encodeURIComponent(id)}`);
   }
 
-  async listTags() {
-    return QuantaClient.items(await this.request<Paged<Tag> | Tag[]>("/api/v1/tags?take=200"));
+  createProject(body: {
+    name: string;
+    code?: string;
+    clientId?: PublicId;
+    visibility?: "private" | "public";
+    notes?: string;
+    startsOn?: string;
+    endsOn?: string;
+    billing?: ProjectBillingInput;
+    assignCreator?: boolean;
+    tasks?: TaskInput[];
+  }) {
+    return this.request<Project>("/api/v1/projects", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  /** Omitted fields are left alone. Tasks are changed through the task calls. */
+  updateProject(
+    id: PublicId,
+    body: {
+      name?: string;
+      code?: string;
+      clientId?: PublicId;
+      visibility?: "private" | "public";
+      notes?: string;
+      startsOn?: string;
+      endsOn?: string;
+      billing?: ProjectBillingInput;
+      isActive?: boolean;
+    },
+  ) {
+    return this.request<Project>(`/api/v1/projects/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Refused with a 409 while the project has time, expenses or a retainer. */
+  deleteProject(id: PublicId) {
+    return this.request<null>(`/api/v1/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  listProjectTasks(projectId: PublicId) {
+    return this.everyPage<Task>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`);
+  }
+
+  createTask(projectId: PublicId, body: TaskInput) {
+    return this.request<Task>(`/api/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  }
+
+  updateTask(
+    id: PublicId,
+    body: { name?: string; billable?: boolean; billableRate?: number; isArchived?: boolean },
+  ) {
+    return this.request<Task>(`/api/v1/tasks/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Refused with a 409 while time is logged against the task. */
+  deleteTask(id: PublicId) {
+    return this.request<null>(`/api/v1/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  listClients() {
+    return this.everyPage<Client>("/api/v1/clients");
+  }
+
+  createClient(body: { name: string; currency?: string; code?: string }) {
+    return this.request<Client>("/api/v1/clients", { method: "POST", body: JSON.stringify(body) });
+  }
+
+  updateClient(
+    id: PublicId,
+    body: { name?: string; currency?: string; code?: string; isActive?: boolean },
+  ) {
+    return this.request<Client>(`/api/v1/clients/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    });
+  }
+
+  /** Refused with a 409 while the client has projects, invoices, payments, quotes or a retainer. */
+  deleteClient(id: PublicId) {
+    return this.request<null>(`/api/v1/clients/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  /**
+   * Invoices as the Invoices page lists them, newest first. Read-only, and it
+   * needs the invoices permission on the key's user. `totals` covers everything
+   * that matched, not only the page.
+   */
+  listInvoices(filters: InvoiceFilters = {}) {
+    const qs = new URLSearchParams();
+    if (filters.status) qs.set("status", filters.status);
+    if (filters.outstanding) qs.set("outstanding", "true");
+    if (filters.clientId) qs.set("clientId", filters.clientId);
+    if (filters.projectId) qs.set("projectId", filters.projectId);
+    if (filters.from) qs.set("from", filters.from);
+    if (filters.to) qs.set("to", filters.to);
+    if (filters.sort) qs.set("sort", filters.sort);
+    if (filters.skip !== undefined) qs.set("skip", String(filters.skip));
+    qs.set("take", String(filters.take ?? 50));
+    return this.request<InvoiceList>(`/api/v1/invoices?${qs.toString()}`);
+  }
+
+  getInvoice(id: PublicId) {
+    return this.request<InvoiceDetail>(`/api/v1/invoices/${encodeURIComponent(id)}`);
+  }
+
+  listTags() {
+    return this.everyPage<Tag>("/api/v1/tags");
   }
 
   /**
@@ -494,6 +733,12 @@ export function formatDuration(seconds: number): string {
   if (h && m) return `${h}h ${m}m`;
   if (h) return `${h}h`;
   return `${m}m`;
+}
+
+/** "1,050.00 CAD" */
+export function formatMoney(amount: number, currency: string | null | undefined): string {
+  const figure = amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return currency ? `${figure} ${currency}` : figure;
 }
 
 export function describeEntry(entry: TimeEntry): string {
