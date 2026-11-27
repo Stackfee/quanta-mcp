@@ -1,10 +1,11 @@
 # Quanta MCP server
 
 Track time in [Quanta](https://quanta.is) from Claude, Cursor, or any other MCP
-client. Start and stop timers, log work you've already done, and ask where your
-hours went, without leaving the conversation.
+client. Start and stop timers, log work you've already done, ask where your
+hours went, set up projects and clients, and check which invoices are still
+unpaid, without leaving the conversation.
 
-Requires a paid Quanta plan (Individual or Team).
+Works on any Quanta plan, including the 14-day trial.
 
 ## Setup
 
@@ -110,13 +111,26 @@ Every endpoint of the public API is covered.
 | `get_current_timer` | Whether a timer is running, and what it's tracking |
 | `start_timer` | Starts a timer, stopping any already-running one first |
 | `stop_timer` | Stops the running timer and saves the entry |
-| `log_time` | Logs a completed block of time you specify in minutes |
+| `log_time` | Logs a completed block of time you specify in minutes, for yourself or a teammate |
 | `update_time_entry` | Edits one entry: description, duration, start, project, task, billable |
 | `delete_time_entry` | Permanently removes an entry |
 | `batch_update_time_entries` | Moves or re-flags up to 100 entries at once, all or nothing |
-| `list_time_entries` | Your recent entries, with their ids |
-| `list_projects` | Projects you can log against, with tasks, billing and budget progress |
+| `get_time_entry` | One entry by id |
+| `list_time_entries` | Your recent entries, with their ids, or a teammate's |
+| `list_projects` | Projects you can log against, with tasks and budget progress; optionally every project, or the deactivated ones |
+| `create_project` | Creates a project, optionally with its tasks |
+| `update_project` | Renames, re-bills, moves, deactivates or reactivates a project |
+| `delete_project` | Permanently removes a project that has nothing logged against it |
+| `list_tasks` | The tasks on one project, archived ones included |
+| `create_task` | Adds a task to a project |
+| `update_task` | Renames, re-rates, archives or restores a task |
+| `delete_task` | Removes a task that has no time against it |
 | `list_clients` | Clients in the workspace |
+| `create_client` | Creates a client |
+| `update_client` | Renames, deactivates or reactivates a client, or changes its currency |
+| `delete_client` | Permanently removes a client that has nothing attached to it |
+| `list_invoices` | Invoices with their status and what is still owed, filterable to outstanding, overdue, a client, a project or a date range |
+| `get_invoice` | One invoice with its lines, taxes and payments |
 | `list_tags` | Tags available for labelling entries |
 | `get_time_report` | Grouped totals by client, project, user or task, filterable |
 | `get_detailed_report` | The individual entries behind a report, across everyone |
@@ -136,15 +150,25 @@ they check the report permissions. A key carries its creator's permissions, so
 if that person cannot open the report in Quanta, the tool is refused and says
 which permission is missing.
 
-**`list_time_entries` only ever shows your own work.** That is the API's
-behaviour, not a setting. To see what someone else did, use
-`get_detailed_report` with `user`.
+**`list_time_entries` shows your own work unless you name a teammate.** Naming
+one, or logging time for one with `log_time`, needs the same permission the app
+asks for to manage other people's time. For everyone at once, use
+`get_detailed_report`.
+
+**Invoices are read-only.** `list_invoices` and `get_invoice` show what the
+Invoices page shows, with the same statuses, to a key whose creator can open
+that page. Creating, sending and recording payments stay in Quanta.
+
+**Deleting is permanent, and Quanta refuses when it would lose work.** A
+project with time on it, a task with time on it or a client with projects or
+invoices cannot be deleted; the tool passes on the refusal and you deactivate
+or archive it instead.
 
 **Timers are exclusive.** Starting a timer stops whatever was already running,
 matching how the web and desktop apps behave.
 
-**Entries are attributed to you, and marked as API-created.** Anything the
-assistant logs appears under your name, with its source recorded as `Api` so you
+**Entries are marked as API-created.** Anything the assistant logs appears
+under your name (or the teammate you named), with its source recorded as `Api` so you
 can tell it apart from web and desktop entries in the detailed report and Excel
 export.
 
@@ -157,6 +181,10 @@ export.
 > "I spent about three hours this morning on the Acme migration. Log it."
 
 > "What did I work on yesterday, and how much of it was billable?"
+
+> "Which invoices are overdue, and how much does Acme still owe us?"
+
+> "Create a project called Website refresh for Northwind with Design and Build tasks."
 
 ## Development
 
